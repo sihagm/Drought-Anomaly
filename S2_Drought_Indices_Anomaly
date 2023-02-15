@@ -1,0 +1,349 @@
+var region = ee.FeatureCollection('FAO/GAUL/2015/level0').filterMetadata('ADM0_NAME', 'equals', 'Switzerland'); 
+//Map.centerObject(region)
+Map.setCenter(8.1, 46.7, 8);
+
+//define dates for the starting period
+var ref_start_date=ee.Date('2015-01-01');
+var ref_end_date=ee.Date('2018-12-31');
+
+// define dates for the comparison period
+var comp_start_date=ee.Date('2020-01-01');
+//var comp_end_date=ee.Date(Date.now());
+var comp_end_date=ee.Date('2020-12-31')
+
+var dataset = ee.ImageCollection('JAXA/ALOS/PALSAR/YEARLY/FNF4')
+                  .filterDate('2018-01-01', '2018-12-31');
+var forestNonForest = dataset.select('fnf').mean().clip(region);
+
+
+var forestMask = forestNonForest.lt(3);
+Map.addLayer(forestMask.mask(forestMask), {min:0, max:1, palette: ["green", "green"]}, 'forest', false);
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////////////
+//function to add NDMI
+var addNDMI = function(image) {
+  var ndmi = image.normalizedDifference(['B8', 'B11']).rename('NDMI');
+  return image.addBands(ndmi);
+};
+
+//function to add MSI
+var addMSI = function(image) {
+  var msi = ee.Image.cat(
+  image.expression('swir / nir',  {
+  swir: image.select('B11'),
+  nir: image.select('B8')
+  }).rename('MSI'));
+  return image.addBands(msi);
+};
+
+
+// Function to mask clouds in the Sentinel 2 collection
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0).and(
+             qa.bitwiseAnd(cirrusBitMask).eq(0));
+
+  // Return the masked and scaled data, without the QA bands.
+  return image.updateMask(mask).divide(10)
+          .select("B.*")
+          .copyProperties(image, ["system:time_start"]);
+}
+
+// Function to mask shadows - dark pixels are masked out
+function maskS2shadows(image) {
+  var darkPixels = image.select(['B8','B11','B12']).reduce(ee.Reducer.sum()).gt(0.35);
+
+  return image.updateMask(darkPixels)
+          .select("B.*")
+          .copyProperties(image, ["system:time_start"]);
+}
+
+// Function to mask more clouds - bright pixels are masked out
+function maskS2bright(image) {
+  var brightPixels = image.select('B2').lt(150);
+
+  return image.updateMask(brightPixels)
+          .select("B.*")
+          .copyProperties(image, ["system:time_start"]);
+}
+
+var bandsS2 = ['B2', 'B3', 'B4', 'B8', 'B11', 'B12', 'QA60'];
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+var firsttime =ee.Number(ref_start_date.millis());
+var lasttime = ee.Number(ref_end_date.millis());
+
+var year_ref = lasttime.subtract(firsttime).divide(8.64e+7).divide(365); //calculates years from first to last date
+
+var firsttime_comp =ee.Number(comp_start_date.millis());
+var lasttime_comp = ee.Number(comp_end_date.millis());
+
+var year_comp = lasttime_comp.subtract(firsttime_comp).divide(8.64e+7).divide(365); //calculates years from first to last date
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//palette for NDWI
+var palette = ['ffffd9','edf8b1','c7e9b4','7fcdbb','41b6c4','1d91c0','225ea8','253494','081d58'];//['white', 'blue', 'black'];
+
+//palette for MSI
+var paletteMSI = ['081d58','253494','225ea8','1d91c0','41b6c4','7fcdbb','c7e9b4','edf8b1','ffffd9'];
+
+//visualization parameters
+var visNDMI={min: 0, max: 0.6, palette: palette};
+var visMSI={min: 0, max: 3, palette: paletteMSI};
+var visSMC={min: 0, max: 60, palette: palette};
+ 
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+/*var vizParamsRGB = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 35,
+  max: 320,
+  gamma: [1.7, 1.8, 1.2]
+};
+
+var collection = ee.ImageCollection('COPERNICUS/S2')
+    .select(bandsS2)
+    .filterDate('2018-08-24', '2018-08-30')
+    // Pre-filter to get less cloudy granules.
+    .filterBounds(roi)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    .map(maskS2clouds)
+    .map(maskS2shadows)
+    .map(maskS2bright)
+    // Sort chronologically in descending order
+    .sort('system:time_start', false)
+    .select('B2', 'B3', 'B4');
+
+var mosaic = collection.mean().clip(region)
+Map.addLayer(mosaic, vizParamsRGB, '25.08.18');*/
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//Load in the S2 collections
+var collections2 = ee.ImageCollection('COPERNICUS/S2')
+    .select(bandsS2)
+    .filterDate(ref_start_date, ref_end_date)
+    // Pre-filter to get less cloudy granules.
+    .filterBounds(region)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    .map(maskS2clouds)
+    .map(maskS2shadows)
+    .map(maskS2bright)
+    .map(maskS2forests)
+    .map(addNDMI)
+    // Sort chronologically in descending order
+    .sort('system:time_start', false);
+
+
+var collections2_comp = ee.ImageCollection('COPERNICUS/S2')
+    .select(bandsS2)
+    .filterDate(comp_start_date, comp_end_date)
+    // Pre-filter to get less cloudy granules.
+    .filterBounds(region)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    .map(maskS2clouds)
+    .map(maskS2shadows)
+    .map(maskS2bright)
+    .map(maskS2forests)
+    .map(addNDMI)
+    // Sort chronologically in descending order
+    .sort('system:time_start', false);
+    
+    
+var collections2msi = ee.ImageCollection('COPERNICUS/S2')
+    .select(bandsS2)
+    .filterDate(ref_start_date, ref_end_date)
+    // Pre-filter to get less cloudy granules.
+    .filterBounds(region)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    .map(maskS2clouds)
+    .map(maskS2shadows)
+    .map(maskS2bright)
+    .map(addMSI)
+    //.map(maskS2vegetation)
+    .sort('system:time_start', false);
+    
+var collections2_compmsi = ee.ImageCollection('COPERNICUS/S2')
+    .select(bandsS2)
+    .filterDate(comp_start_date, comp_end_date)
+    // Pre-filter to get less cloudy granules.
+    .filterBounds(region)
+    .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+    .map(maskS2clouds)
+    .map(maskS2shadows)
+    .map(maskS2bright)
+    .map(addMSI)
+    //.map(maskS2vegetation)
+    .sort('system:time_start', false);
+
+// Compute the mean of the reference period.
+collections2=collections2.select('NDMI')
+var mean_collections2 = collections2.mean().clip(region);
+//mean_collections2 = mean_collections2.reproject(mean_collections2.projection(), null, 20)
+collections2msi=collections2msi.select('MSI')
+var mean_collections2msi = collections2msi.mean().clip(region);
+
+Map.addLayer(mean_collections2, visNDMI, 'NDMI for the reference period', false);
+Map.addLayer(mean_collections2msi, visMSI, 'MSI for the reference period', false);
+
+// Compute the mean of the comparison period.
+collections2_comp=collections2_comp.select('NDMI')
+var mean_collections2_comp = collections2_comp.mean().clip(region);
+collections2_compmsi=collections2_compmsi.select('MSI')
+var mean_collections2_compmsi = collections2_compmsi.mean().clip(region);
+
+// Update with the water mask.
+var mean_collections2_comp = mean_collections2_comp;
+//mean_collections2_comp = mean_collections2_comp.reproject(mean_collections2_comp.projection(), null, 20)
+
+Map.addLayer(mean_collections2_comp, visNDMI, 'NDMI for the comparison period', false);
+Map.addLayer(mean_collections2_compmsi, visMSI, 'MSI for the comparison period', false);
+ 
+// Calculate the anomaly compared to the reference period
+var difference=mean_collections2_comp.subtract(mean_collections2);
+var differenceMSI=mean_collections2_compmsi.subtract(mean_collections2msi);
+
+// Update with the forest mask.
+var difference = difference.updateMask(forestMask);
+// Make an image collection of visualization images.
+
+// Display cumulative anomalies.
+Map.addLayer(difference,{min: -0.3, max: 0.3, palette: ['red','white','blue']}, 'NDMI anomaly', true);
+Map.addLayer(differenceMSI,{min: -0.3, max: 0.3, palette: ['blue','white','red']}, 'MSI anomaly', false);
+
+//display permanent damage (NDWI difference <= -10%)
+var permanent = difference.lte(-0.1);
+Map.addLayer(permanent.mask(permanent), {min: 0, max: 1, palette: ['red','red']}, 'permanent damage', false);
+
+////////////////////////////////////////////////
+// Calculate the soil moisture content (SMC) in 20cm soil depth from the msi
+// This has been done empirically for Landsat data - here we assume that we can use it 1:1 for S2 data too
+//https://www.researchgate.net/publication/318496601_Estimation_of_Soil_Moisture_Percentage_Using_LANDSAT-based_Moisture_Stress_Index
+
+//function to calculate SMC
+var addSMC = function(image) {
+  var smc = ee.Image.cat(
+  image.expression('(msi * -75.103) + 82.062',  {
+  msi: image.select('MSI')
+  }).rename('SMC'));
+  return image.addBands(smc);
+};
+
+var SMC = collections2msi.map(addSMC)
+var SMC_comp = collections2_compmsi.map(addSMC)
+
+SMC = SMC.select('SMC')
+var mean_SMC = SMC.mean().clip(region);
+
+SMC_comp=SMC_comp.select('SMC')
+var mean_SMC_comp = SMC_comp.mean().clip(region);
+
+Map.addLayer(mean_SMC, visSMC, 'SMC for the reference period', false);
+Map.addLayer(mean_SMC_comp, visSMC, 'SMC for the comparison period', false);
+
+var differenceSMC = mean_SMC_comp.subtract(mean_SMC);
+Map.addLayer(differenceSMC,{min: -20, max: 20, palette: ['red','white','blue']}, 'SMC anomaly', false);
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+//Average NDWI per month and monthly anomalies
+
+var temporalAverage = function(collection, unit) {
+  // function temporalAverage(collection, unit)
+  // makes a new image collection with temporal averages of images
+  // in input. The period of each time segment is given by 'unit' and can be
+  // one of 'year', 'month', 'week' or 'day'. The temporal extent 
+  // matches that of the input 'collection'
+
+  var startDate = ee.Date(ee.Image(collection.sort('system:time_start').first()).get('system:time_start'));
+  startDate = startDate.advance(ee.Number(0).subtract(startDate.getRelative('day',unit)),'day')
+    .update(null,null,null,0,0,0);
+
+  var endDate = ee.Date(ee.Image(collection.sort('system:time_start',false).first()).get('system:time_start'));
+  endDate = endDate.advance(ee.Number(0).subtract(endDate.getRelative('day',unit)),'day')
+    .advance(1,unit).advance(-1,'day')
+    .update(null,null,null,23,59,59);
+ 
+  var dateRanges = ee.List.sequence(0, endDate.difference(startDate,unit).round().subtract(1));
+
+  function makeTimeslice(num) {
+    var start = startDate.advance(num, unit);
+    var end = start.advance(1, unit).advance(-1, 'second');
+    // Filter to the date range
+    var filtered = collection.filterDate(start, end);
+    // Get the mean
+    var unitMeans = filtered.mean()
+      .set('system:time_start',start,'system:time_end',end);
+    return unitMeans;
+  }
+  // Aggregate to each timeslice
+  var new_collection = ee.ImageCollection(dateRanges.map(makeTimeslice));
+
+  return new_collection;
+};
+  
+//average monthly NDWI for the long period
+var newcoll=temporalAverage(collections2,'month');
+var newcollmsi=temporalAverage(collections2msi,'month');
+var newcollsmc=temporalAverage(SMC,'month');
+//print(newcoll);
+//Map.addLayer(ee.Image(newcoll.first()));
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+function maskS2forests(image) {
+  return image.updateMask(forestMask)
+          .select("B.*")
+          .copyProperties(image, ["system:time_start"]);
+}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////////////
+//CHARTS
+
+//for a chart of the water index
+  var NDWI_combined = ee.ImageCollection('COPERNICUS/S2')
+  .filterDate(ref_start_date, comp_end_date)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .filterBounds(region)
+  .map(maskS2clouds)
+  .map(maskS2shadows)
+  .map(maskS2forests)
+  .map(maskS2bright)
+  .map(addNDMI)
+  .select(['NDMI'])
+  .sort('system:time_start', false);
+  
+var NDWI_TS = ui.Chart.image.series(NDWI_combined, region, ee.Reducer.mean(),1000, 'system:time_start').setOptions({
+          title: 'NDMI Time Series',
+          vAxis: {title: 'NDMI'},
+});
+print(NDWI_TS);
+
+var NDWI_TS_monthly = ui.Chart.image.series(newcoll, region, ee.Reducer.mean(), 1000, 'system:time_start').setOptions({
+          title: 'NDMI of forests - monthly Time Series',
+          vAxis: {title: 'NDMI'},
+});
+print(NDWI_TS_monthly);
+
+var MSI_TS_monthly = ui.Chart.image.series(newcollmsi, region, ee.Reducer.mean(), 1000, 'system:time_start').setOptions({
+          title: 'MSI monthly Time Series',
+          vAxis: {title: 'MSI'},
+});
+print(MSI_TS_monthly);
+
+var SMC_TS_monthly = ui.Chart.image.series(newcollsmc, region, ee.Reducer.mean(), 1000, 'system:time_start').setOptions({
+          title: 'Soil moisture content (20cm) monthly Time Series',
+          vAxis: {title: 'SMC [%]'},
+});
+print(SMC_TS_monthly);
+
+
+
